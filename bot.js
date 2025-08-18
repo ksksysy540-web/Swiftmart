@@ -1,141 +1,115 @@
-import { Telegraf, session, Markup } from "telegraf";
-import { createClient } from "@supabase/supabase-js";
-import fetch from "node-fetch";
+import 'dotenv/config'
+import TelegramBot from 'node-telegram-bot-api'
+import { createClient } from '@supabase/supabase-js'
 
-// --- Supabase Client ---
+// --- Supabase setup ---
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
+  process.env.SUPABASE_KEY
+)
 
-// --- Telegram Bot ---
-const bot = new Telegraf(process.env.BOT_TOKEN);
-bot.use(session());
+// --- Telegram Bot setup ---
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true })
 
-// Start add product flow
-bot.command("addproduct", (ctx) => {
-  ctx.session = { step: "name", product: {} };
-  ctx.reply("📌 Send product name:");
-});
+// --- User session store (in-memory) ---
+const userSessions = {}
 
-// Handle text inputs
-bot.on("text", async (ctx) => {
-  if (!ctx.session || !ctx.session.step) return;
+// Start command
+bot.onText(/\/start/, (msg) => {
+  bot.sendMessage(msg.chat.id, '👋 Welcome! Type /addproduct to add a new product.')
+})
 
-  const text = ctx.message.text;
+// Add product command
+bot.onText(/\/addproduct/, (msg) => {
+  const chatId = msg.chat.id
+  userSessions[chatId] = { step: 'name', data: {} }
+  bot.sendMessage(chatId, '📦 Please enter product *name*:', { parse_mode: 'Markdown' })
+})
 
-  switch (ctx.session.step) {
-    case "name":
-      ctx.session.product.name = text;
-      ctx.session.step = "description";
-      return ctx.reply("✏️ Send product description:");
+// Handle text messages step by step
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id
+  const session = userSessions[chatId]
 
-    case "description":
-      ctx.session.product.description = text;
-      ctx.session.step = "price";
-      return ctx.reply("💰 Send product price:");
+  if (!session || msg.text.startsWith('/')) return
 
-    case "price":
-      ctx.session.product.price = parseFloat(text);
-      ctx.session.step = "discount";
-      return ctx.reply("🔖 Send discount (%):");
+  switch (session.step) {
+    case 'name':
+      session.data.name = msg.text
+      session.step = 'description'
+      bot.sendMessage(chatId, '📝 Enter product *description*:', { parse_mode: 'Markdown' })
+      break
 
-    case "discount":
-      ctx.session.product.discount = parseInt(text);
-      ctx.session.step = "badge";
-      return ctx.reply(
-        "🏷️ Choose a badge:",
-        Markup.inlineKeyboard([
-          [Markup.button.callback("🆕 New Arrival", "badge_New Arrival")],
-          [Markup.button.callback("🔥 Limited Offer", "badge_Limited Offer")],
-          [Markup.button.callback("📈 Trending", "badge_Trending")],
-          [Markup.button.callback("⭐ Best Seller", "badge_Best Seller")],
-        ])
-      );
+    case 'description':
+      session.data.description = msg.text
+      session.step = 'price'
+      bot.sendMessage(chatId, '💰 Enter product *price*:', { parse_mode: 'Markdown' })
+      break
 
-    case "affiliate":
-      ctx.session.product.affiliate = text;
-      ctx.session.step = "image";
-      return ctx.reply("📸 Now send product image:");
+    case 'price':
+      session.data.price = parseFloat(msg.text)
+      session.step = 'discount'
+      bot.sendMessage(chatId, '🔖 Enter *discount* percentage (0 if none):', { parse_mode: 'Markdown' })
+      break
+
+    case 'discount':
+      session.data.discount = parseFloat(msg.text)
+      session.step = 'badge'
+      bot.sendMessage(chatId, '🏷 Select a *badge*:', {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🆕 New Arrival', callback_data: 'New Arrival' }],
+            [{ text: '🔥 Trending', callback_data: 'Trending' }],
+            [{ text: '⭐ Best Seller', callback_data: 'Best Seller' }],
+            [{ text: '⏳ Limited Offer', callback_data: 'Limited Offer' }],
+          ]
+        }
+      })
+      break
+
+    case 'affiliate':
+      session.data.affiliate_link = msg.text
+      session.step = 'image'
+      bot.sendMessage(chatId, '🖼 Please upload a product *image*:', { parse_mode: 'Markdown' })
+      break
   }
-});
+})
 
 // Handle badge selection
-bot.action(/badge_(.+)/, async (ctx) => {
-  ctx.session.product.badge = ctx.match[1];
-  ctx.session.step = "affiliate";
-  await ctx.answerCbQuery();
-  return ctx.reply("🔗 Send affiliate link:");
-});
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id
+  const session = userSessions[chatId]
+  if (!session) return
+
+  if (session.step === 'badge') {
+    session.data.badge = query.data
+    session.step = 'affiliate'
+    bot.sendMessage(chatId, '🔗 Please provide *affiliate link*:', { parse_mode: 'Markdown' })
+  }
+
+  bot.answerCallbackQuery(query.id)
+})
 
 // Handle image upload
-bot.on("photo", async (ctx) => {
-  if (!ctx.session || ctx.session.step !== "image") return;
+bot.on('photo', async (msg) => {
+  const chatId = msg.chat.id
+  const session = userSessions[chatId]
+  if (!session || session.step !== 'image') return
 
-  const fileId = ctx.message.photo.pop().file_id;
-  const fileLink = await ctx.telegram.getFileLink(fileId);
+  const fileId = msg.photo[msg.photo.length - 1].file_id
+  const file = await bot.getFile(fileId)
+  const imageUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`
 
-  // Download image
-  const response = await fetch(fileLink.href);
-  const buffer = Buffer.from(await response.arrayBuffer());
+  session.data.image_url = imageUrl
 
-  const filePath = `products/${Date.now()}.jpg`;
-
-  // Upload to Supabase storage
-  const { error: uploadError } = await supabase.storage
-    .from("product-images")
-    .upload(filePath, buffer, {
-      contentType: "image/jpeg",
-      upsert: true,
-    });
-
-  if (uploadError) {
-    return ctx.reply("❌ Image upload failed: " + uploadError.message);
-  }
-
-  const { data: publicUrl } = supabase.storage
-    .from("product-images")
-    .getPublicUrl(filePath);
-
-  // Save product to DB
-  const { error } = await supabase.from("products").insert([
-    {
-      product_name: ctx.session.product.name,
-      description: ctx.session.product.description,
-      price: ctx.session.product.price,
-      discount: ctx.session.product.discount,
-      affiliate_link: ctx.session.product.affiliate,
-      badge: ctx.session.product.badge,
-      image_url: publicUrl.publicUrl,
-    },
-  ]);
-
+  // --- Insert into Supabase ---
+  const { error } = await supabase.from('products').insert([session.data])
   if (error) {
-    return ctx.reply("❌ Failed to save product: " + error.message);
+    bot.sendMessage(chatId, '❌ Error saving product: ' + error.message)
+  } else {
+    bot.sendMessage(chatId, '✅ Product added successfully!')
   }
 
-  // Ask if user wants to add more
-  ctx.reply(
-    "✅ Product added successfully!\nDo you want to add another product?",
-    Markup.inlineKeyboard([
-      [Markup.button.callback("✅ Yes", "add_more")],
-      [Markup.button.callback("❌ No", "add_done")],
-    ])
-  );
-  ctx.session.step = "done";
-});
-
-// Handle add more or done
-bot.action("add_more", (ctx) => {
-  ctx.session = { step: "name", product: {} };
-  ctx.answerCbQuery();
-  ctx.reply("📌 Send product name:");
-});
-
-bot.action("add_done", (ctx) => {
-  ctx.session = null;
-  ctx.answerCbQuery();
-  ctx.reply("🎉 All products added successfully!");
-});
-
-bot.launch();
+  delete userSessions[chatId]
+})
