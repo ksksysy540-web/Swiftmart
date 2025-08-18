@@ -2,11 +2,11 @@
   "name": "telegram-product-bot",
   "version": "1.0.0",
   "description": "Telegram bot for uploading products to Supabase with image, discount, and badge",
-  "main": "index.js",
+  "main": "bot.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
   },
   "keywords": [
     "telegram",
